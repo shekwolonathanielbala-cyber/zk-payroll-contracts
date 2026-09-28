@@ -11,6 +11,7 @@ contract storage changes.
 1. [Migration Test Framework](#1-migration-test-framework)
 2. [Upgrade Assumptions](#2-upgrade-assumptions)
 3. [State Version Rules](#3-state-version-rules)
+   - [3.4 Pre-Activation Compatibility Check](#34-pre-activation-compatibility-check)
 4. [Adding Migration Coverage](#4-adding-migration-coverage)
 5. [Migration Test Checklist](#5-migration-test-checklist)
 6. [Supported Storage Keys](#6-supported-storage-keys)
@@ -177,6 +178,56 @@ When introducing a breaking storage change:
    - Asserts post-migration correctness
 5. **Document**: Update this file's version table and
    [migration-notes.md](migration-notes.md) (per-contract notes).
+
+### 3.4 Pre-Activation Compatibility Check
+
+Before an upgraded implementation is activated, validate that the persistent
+data already on chain is still usable by it. `payment_executor` exposes this
+preflight as a read-only entry-point:
+
+```bash
+stellar contract invoke --id $EXECUTOR_ID \
+  -- check_upgrade_compatibility --target_version 2
+```
+
+The call requires the executor admin's authorization and never writes storage,
+so it is safe to run against a live executor holding real payment history.
+It validates that:
+
+1. The contract is initialized (dependency addresses present).
+2. The persisted schema version is readable by the incoming implementation,
+   i.e. `current <= target`. A `target` below `current` is a schema downgrade
+   and is rejected rather than silently truncating reads.
+3. An executor admin is configured, so the upgraded implementation retains an
+   authority for asset and period administration.
+4. The canonical treasury asset is still allowlisted and has decimal
+   configuration — both are required by `execute_payment`, so an upgrade that
+   skipped them would otherwise fail on the first payroll run.
+
+On success it returns an `UpgradeCompatibilityReport` containing the current
+and target schema versions plus four readiness booleans. The report is
+deliberately limited to operational metadata: it never contains employee
+addresses, salary commitments, payment amounts, proof hashes, or payout
+totals, so it is safe to paste into logs, CI output, or an upgrade checklist.
+
+Failures return a typed `StorageError` (see
+[error-taxonomy.md](error-taxonomy.md)) rather than a message string, so the
+remediation path is unambiguous and nothing payroll-valued is disclosed:
+
+| Error | Meaning | Remediation |
+|-------|---------|-------------|
+| `NotInitialized` (700) | No dependency addresses stored | The deployment was never initialized; do not activate an upgrade on it |
+| `StorageVersionMismatch` (702) | `target` is older than the persisted version, or `target` is `0` | Activate the matching schema, or run the forward migration handlers first |
+| `StorageCorruption` (703) | Executor admin missing, or the treasury asset is un-allowlisted / has no decimal configuration | Restore the admin (`set_executor_admin`), re-allow the asset (`set_asset_allowed`), and configure decimals (`set_asset_decimals`) before activating |
+
+Record the result in the upgrade checklist. A blocked preflight means the
+upgrade is **not** activated — it is a pre-condition, not a warning.
+
+Coverage: `contracts/payment_executor/tests/upgrade_compatibility_tests.rs`
+(happy path, forward schema, read-only guarantee, and the uninitialized,
+downgrade, missing-admin, disallowed-asset, and missing-decimals failure
+cases) and the `UP-09` cases in
+`contracts/integration_tests/src/upgrade_simulation.rs`.
 
 ---
 

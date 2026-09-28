@@ -169,6 +169,13 @@ Storage errors relate to initialization and version compatibility.
 **SDK Guidance**: Storage errors indicate contract initialization or upgrade issues.
 `NotInitialized` is retryable after calling the initialize function.
 
+`StorageVersionMismatch` (702) and `StorageCorruption` (703) are also returned by
+`payment_executor.check_upgrade_compatibility`, the read-only preflight run against
+the currently deployed contract before an upgraded implementation is activated. A
+non-`Ok` result from that call blocks activation rather than being advisory — see
+[upgrades.md § 3.4](upgrades.md#34-pre-activation-compatibility-check) for the
+remediation table. Neither error carries payroll values.
+
 ## Retry Decision Tree
 
 ```

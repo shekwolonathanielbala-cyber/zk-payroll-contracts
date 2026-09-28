@@ -17,4 +17,5 @@ proof_verifier = { path = "../proof_verifier" }
 token = { path = "../token" }
 pause_manager = { path = "../pause_manager" }
 payment_executor = { path = "../payment_executor" }
+shared_errors = { path = "../shared_errors" }
 stellar-strkey = "0.0.18"

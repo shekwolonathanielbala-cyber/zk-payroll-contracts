@@ -282,9 +282,14 @@ When rolling out a contract upgrade:
 
 1. **Write an RFC** — Document the change, why it's needed, impact on SDK/dashboard, timeline.
 2. **Announce in release notes** (pre-release) — "Deprecation: `set_commitment()` will be replaced by `set_commitment_v2()` in v0.5."
-3. **Deploy to testnet** — New contract runs in parallel with old one.
-4. **Test migration** — Verify old clients still work, new clients can use new features.
-5. **Wait 1 release cycle minimum** — Let users upgrade their code.
+3. **Run the compatibility check** — Before activating the new implementation, call
+   `check_upgrade_compatibility(target_version)` on the contract being replaced.
+   The call is read-only and admin-gated; it confirms the persistent data on
+   chain is still readable by the incoming schema. A typed `StorageError` blocks
+   activation. See [docs/upgrades.md § 3.4](../upgrades.md#34-pre-activation-compatibility-check).
+4. **Deploy to testnet** — New contract runs in parallel with old one.
+5. **Test migration** — Verify old clients still work, new clients can use new features.
+6. **Wait 1 release cycle minimum** — Let users upgrade their code.
 
 ### 5.2 Upgrade
 

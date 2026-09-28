@@ -344,6 +344,19 @@ See [contracts/tests/README.md](contracts/tests/README.md) for common local setu
 See [docs/errors.md](docs/errors.md) for common contract failure modes,
 retryability guidance, and suggested SDK/dashboard recovery messages.
 
+## Contract Upgrades
+
+Before activating an upgraded contract implementation, validate that the data
+already on chain is still compatible. `payment_executor` exposes a read-only,
+admin-gated preflight that reports schema versions and readiness flags, and
+fails with a typed storage error when an activation should be blocked. The
+report never includes salaries, commitments, employee addresses, or amounts.
+
+See [docs/upgrades.md](docs/upgrades.md#34-pre-activation-compatibility-check) for
+the procedure and remediation table, and
+[docs/architecture/storage-key-versioning.md](docs/architecture/storage-key-versioning.md)
+for the versioning strategy.
+
 ## Deployment Verification Checklist
 
 See [docs/deployment-verification.md](docs/deployment-verification.md) for a comprehensive checklist covering contract IDs, target network configuration, ZK verifier parameters, treasury setup, admin roles, and post-deploy smoke tests.

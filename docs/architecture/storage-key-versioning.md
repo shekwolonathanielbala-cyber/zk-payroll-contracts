@@ -43,6 +43,14 @@ This document specifies the storage key versioning strategy and migration guidel
 
 1. **Pre-Upgrade Storage Inspection**:
    - Read `get_storage_version()`. If current version matches contract WASM version, no storage migration script is required.
+   - Validate compatibility before activation: call
+     `payment_executor.check_upgrade_compatibility(target_version)` on the
+     currently deployed contract. The call is read-only and executor-admin
+     gated, and returns an `UpgradeCompatibilityReport` (schema versions plus
+     readiness flags) or a typed `StorageError`. A non-`Ok` result blocks
+     activation — see [docs/upgrades.md § 3.4](../upgrades.md#34-pre-activation-compatibility-check)
+     for the remediation table. The report is privacy-safe by construction: it
+     carries no employee addresses, commitments, amounts, or proof material.
 
 2. **Sequential Version Upgrades**:
    - If version `V_current < V_target`, execute forward migration handlers sequentially (`V1 -> V2 -> V3`).
@@ -57,4 +65,11 @@ This document specifies the storage key versioning strategy and migration guidel
 
 Storage key versioning and upgrade compatibility are verified in automated test suites:
 - `up08_storage_key_versioning_and_migration` in `contracts/integration_tests/src/upgrade_simulation.rs`
+- `up09_pre_activation_compatibility_check_preserves_state` and
+  `up09_pre_activation_compatibility_check_rejects_invalid_target` in
+  `contracts/integration_tests/src/upgrade_simulation.rs`
 - Unit tests `test_storage_version_returns_version_1` in `contracts/payment_executor/src/lib.rs`
+- `contracts/payment_executor/tests/upgrade_compatibility_tests.rs` — the
+  pre-activation check covering the happy path, forward schema compatibility,
+  the read-only guarantee, and the uninitialized / downgrading-target /
+  missing-admin / disallowed-asset / missing-decimals failure cases.

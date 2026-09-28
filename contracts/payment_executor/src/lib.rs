@@ -7,7 +7,7 @@ use pause_manager::PauseManagerClient;
 use payroll_registry::{CompanyInfo, PayrollRegistryClient};
 use proof_verifier::{Groth16Proof, ProofVerifierClient};
 use salary_commitment::SalaryCommitmentContractClient;
-use shared_errors::TreasuryError;
+use shared_errors::{StorageError, TreasuryError};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol,
 };
@@ -76,6 +76,32 @@ pub enum PaymentError {
     CrossAssetMismatch = 11,
     /// The supplied asset uses a different issuer/token contract.
     AssetIssuerMismatch = 12,
+}
+
+/// Result of a pre-activation upgrade compatibility check.
+///
+/// Every field is non-sensitive operational metadata: schema versions and
+/// boolean readiness flags. The report deliberately carries no employee
+/// addresses, salary commitments, payment amounts, proof hashes, or aggregate
+/// payout figures, so it is safe to emit to logs, CI output, or an upgrade
+/// checklist.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeCompatibilityReport {
+    /// Storage schema version currently persisted on chain.
+    pub current_version: u32,
+    /// Storage schema version the incoming implementation expects.
+    pub target_version: u32,
+    /// True when the contract dependency addresses are present.
+    pub initialized: bool,
+    /// True when an executor admin is configured and can authorise post-upgrade
+    /// operations.
+    pub admin_configured: bool,
+    /// True when the canonical treasury asset remains allowlisted.
+    pub treasury_asset_allowed: bool,
+    /// True when the treasury asset has a configured decimal precision, which
+    /// the amount-normalisation path requires.
+    pub treasury_asset_decimals_configured: bool,
 }
 
 /// Contract addresses for dependencies
@@ -257,6 +283,87 @@ impl PaymentExecutor {
             .persistent()
             .get(&DataKey::StorageVersion)
             .unwrap_or(1u32)
+    }
+
+    /// Validate that persistent data stays readable after a contract
+    /// implementation upgrade (issue #517).
+    ///
+    /// Call this on the *currently deployed* contract immediately before
+    /// activating a replacement WASM implementation. The check is read-only:
+    /// it never writes storage and never mutates payroll state, so it is safe
+    /// to run against a live executor holding real payment history.
+    ///
+    /// Validated invariants:
+    ///   1. The contract is initialized (dependency addresses present).
+    ///   2. The persisted schema version is one this implementation can read,
+    ///      i.e. `current <= target`. A `target` below `current` is a schema
+    ///      downgrade and is rejected rather than silently truncating reads.
+    ///   3. An executor admin is configured, so the upgraded implementation
+    ///      retains an authority for asset and period administration.
+    ///   4. The canonical treasury asset is still allowlisted and has decimal
+    ///      configuration, both of which `execute_payment` requires.
+    ///
+    /// # Privacy
+    ///
+    /// The returned [`UpgradeCompatibilityReport`] contains schema versions
+    /// and readiness booleans only. Failure paths return a typed
+    /// [`StorageError`] variant rather than a message string, so no salary
+    /// amount, employee address, or proof material is disclosed in logs.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::NotInitialized`] — no dependency addresses stored.
+    /// - [`StorageError::StorageVersionMismatch`] — `target` is older than the
+    ///   persisted schema version, or `target` is `0` (no valid schema).
+    /// - [`StorageError::StorageCorruption`] — executor admin missing, or the
+    ///   treasury asset is un-allowlisted / missing decimal configuration.
+    pub fn check_upgrade_compatibility(
+        env: Env,
+        target_version: u32,
+    ) -> Result<UpgradeCompatibilityReport, StorageError> {
+        let addresses: ContractAddresses = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Addresses)
+            .ok_or(StorageError::NotInitialized)?;
+
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ExecutorAdmin)
+            .ok_or(StorageError::StorageCorruption)?;
+        admin.require_auth();
+
+        let current_version = Self::get_storage_version(env.clone());
+
+        // `target_version == 0` is not a valid schema, and a target below the
+        // persisted version would make existing records unreadable.
+        if target_version == 0 || target_version < current_version {
+            return Err(StorageError::StorageVersionMismatch);
+        }
+
+        let treasury_asset_allowed =
+            env.storage()
+                .persistent()
+                .get(&DataKey::AllowedAsset(addresses.token.clone()))
+                .unwrap_or(false);
+        let treasury_asset_decimals_configured =
+            env.storage()
+                .persistent()
+                .has(&DataKey::AssetDecimals(addresses.token));
+
+        if !treasury_asset_allowed || !treasury_asset_decimals_configured {
+            return Err(StorageError::StorageCorruption);
+        }
+
+        Ok(UpgradeCompatibilityReport {
+            current_version,
+            target_version,
+            initialized: true,
+            admin_configured: true,
+            treasury_asset_allowed,
+            treasury_asset_decimals_configured,
+        })
     }
 
     /// Configure the decimal places for an asset token (issue #354).

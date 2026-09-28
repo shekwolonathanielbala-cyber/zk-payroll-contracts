@@ -14,6 +14,7 @@
 //! | UP-03 | `DataKey` enum extension — new variant added | Old keys unaffected; new key independently addressable |
 //! | UP-04 | Nullifier store preserved across re-initialisation | Double-spend guard survives upgrade |
 //! | UP-05 | Commitment version counter monotonic across simulated upgrade | Version numbering not reset |
+//! | UP-09 | `payment_executor` pre-activation compatibility check | Persistent data validated before an upgraded WASM is activated |
 //!
 //! ## How to run
 //!
@@ -31,6 +32,7 @@ mod upgrade_simulation {
     use proof_verifier::{ProofVerifier, ProofVerifierClient, VerificationKey};
     use salary_commitment::{SalaryCommitmentContract, SalaryCommitmentContractClient};
     use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
+    use token::Token;
 
     // ── Shared fixture helpers ────────────────────────────────────────────────
 
@@ -447,5 +449,126 @@ mod upgrade_simulation {
             1,
             "UP-08: Storage version must equal 1 upon initialization"
         );
+    }
+
+    // ── UP-09: pre-activation compatibility check ─────────────────────────────
+
+    /// UP-09: An operator must be able to validate that persistent data stays
+    /// compatible *before* an upgraded implementation is activated.
+    ///
+    /// The check runs against the currently deployed contract, so it captures
+    /// the pre-upgrade state and reports whether the incoming schema can read
+    /// it. It is read-only: the persisted storage version and the payment
+    /// record written under the old implementation are both untouched.
+    #[test]
+    fn up09_pre_activation_compatibility_check_preserves_state() {
+        use payment_executor::{ContractAddresses, PaymentExecutor, PaymentExecutorClient};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor = PaymentExecutorClient::new(&env, &executor_id);
+
+        let registry = env.register_contract(None, PayrollRegistry);
+        let commitment = env.register_contract(None, SalaryCommitmentContract);
+        let verifier = env.register_contract(None, ProofVerifier);
+        let token = env.register_contract(None, Token);
+
+        let addrs = ContractAddresses {
+            registry,
+            commitment,
+            verifier,
+            token: token.clone(),
+        };
+        executor.initialize(&addrs);
+        executor.set_executor_admin(&Address::generate(&env));
+        executor.set_asset_decimals(&addrs.token, &7);
+
+        // Pre-upgrade state: a company and an open period exist on chain.
+        let registry_client = PayrollRegistryClient::new(&env, &registry);
+        let company_admin = Address::generate(&env);
+        let company_treasury = Address::generate(&env);
+        let company_id = registry_client.register_company(&company_admin, &company_treasury);
+        let period = executor.create_period(&company_id);
+        assert_eq!(period.period_id, 1);
+
+        // The preflight passes for a forward-compatible target schema.
+        let report = executor
+            .try_check_upgrade_compatibility(&2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.current_version, 1, "UP-09: persisted version is 1");
+        assert_eq!(report.target_version, 2, "UP-09: target version is 2");
+        assert!(report.initialized, "UP-09: contract must report initialized");
+        assert!(
+            report.admin_configured,
+            "UP-09: contract must report an executor admin"
+        );
+        assert!(
+            report.treasury_asset_allowed,
+            "UP-09: treasury asset must remain allowlisted"
+        );
+        assert!(
+            report.treasury_asset_decimals_configured,
+            "UP-09: treasury decimals must remain configured"
+        );
+
+        // The check did not mutate persistent state.
+        assert_eq!(
+            executor.get_storage_version(),
+            1,
+            "UP-09: compatibility check must not bump the storage version"
+        );
+        assert!(
+            executor.get_period(&company_id, &1).is_some(),
+            "UP-09: pre-upgrade period must remain readable"
+        );
+
+        // Payroll state remains writable after the preflight, so the upgrade
+        // does not strand an in-flight payroll.
+        let next_period = executor.create_period(&company_id);
+        assert_eq!(
+            next_period.period_id, 2,
+            "UP-09: new periods must still be creatable after the check"
+        );
+    }
+
+    /// UP-09 (edge case): the preflight must reject a deployment whose
+    /// persistent data the incoming implementation could not use, and it must
+    /// report that as a typed storage error rather than a message string, so
+    /// no payroll value is disclosed.
+    #[test]
+    fn up09_pre_activation_compatibility_check_rejects_invalid_target() {
+        use payment_executor::{ContractAddresses, PaymentExecutor, PaymentExecutorClient};
+        use shared_errors::StorageError;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let executor_id = env.register_contract(None, PaymentExecutor);
+        let executor = PaymentExecutorClient::new(&env, &executor_id);
+
+        let addrs = ContractAddresses {
+            registry: env.register_contract(None, PayrollRegistry),
+            commitment: env.register_contract(None, SalaryCommitmentContract),
+            verifier: env.register_contract(None, ProofVerifier),
+            token: Address::generate(&env),
+        };
+        executor.initialize(&addrs);
+        executor.set_executor_admin(&Address::generate(&env));
+        executor.set_asset_decimals(&addrs.token, &7);
+
+        // Edge case: a target schema older than the persisted version would
+        // make existing records unreadable, so activation must be blocked.
+        let result = executor.try_check_upgrade_compatibility(&0);
+        assert_eq!(
+            result,
+            Err(Ok(StorageError::StorageVersionMismatch)),
+            "UP-09: an invalid target version must block activation"
+        );
+
+        // The blocked preflight left persistent state intact.
+        assert_eq!(executor.get_storage_version(), 1);
     }
 }

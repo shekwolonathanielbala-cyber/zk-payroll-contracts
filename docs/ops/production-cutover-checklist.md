@@ -87,6 +87,21 @@ subset after production-like cutover.
 - [ ] **Contract initialization validated** — confirm every initialized contract
   returns expected admin, operator, token, verifier, registry, commitment, and
   pause-manager addresses.
+- [ ] **Upgrade compatibility checked** — when a cutover activates an upgraded
+  implementation, run the read-only preflight on the contract being replaced
+  before switching over:
+
+```bash
+stellar contract invoke --id $EXECUTOR_ID --source $SOURCE --network $NETWORK \
+  -- check_upgrade_compatibility --target_version <new_version>
+```
+
+  A non-`Ok` result (`NotInitialized` 700, `StorageVersionMismatch` 702, or
+  `StorageCorruption` 703) **blocks activation** — fix the reported condition
+  and re-run, do not proceed and note it as a follow-up. Record the returned
+  schema versions in the release thread; the report contains only versions and
+  readiness flags, so it is safe to paste there. See
+  [upgrades.md § 3.4](../upgrades.md#34-pre-activation-compatibility-check).
 - [ ] **End-to-end payroll path tested** — run a representative payroll flow from
   SDK/dashboard entry point through contract invocation and reconciliation.
 - [ ] **Proof compatibility checked** — submit at least one known-good proof and
